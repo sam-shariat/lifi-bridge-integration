@@ -1,9 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import dynamic from "next/dynamic";
-// Dynamically import providers to prevent WalletConnect / RainbowKit from initializing during SSR (indexedDB not available)
-const Providers = dynamic(() => import("./providers"), { ssr: false });
+// Import the client Providers directly; it's a Client Component and will render on the client boundary.
+import Providers from "./providers";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
