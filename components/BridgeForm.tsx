@@ -42,11 +42,22 @@ function useTokens(chainId?: number, include: 'popular' | 'all' = 'popular') {
     // Normalize to always return { tokens: Token[] } and swallow non-OK as empty
     queryFn: async () => {
       try {
-        const data = await fetchJSON<unknown>(`/api/lifi/tokens?chainId=${chainId}&include=${include}`);
+        // LI.FI docs: GET /v1/tokens returns an object mapping chainId -> Token[]
+        // Optional query param `chains` restricts to specific chains. No `include` param.
+        const data = await fetchJSON<unknown>(`/api/lifi/tokens?chains=${chainId}`);
         if (Array.isArray(data)) return { tokens: data as Token[] };
-        const maybeObj = data as { tokens?: unknown; data?: unknown };
-        if (Array.isArray(maybeObj?.tokens)) return { tokens: maybeObj.tokens as Token[] };
-        if (Array.isArray(maybeObj?.data)) return { tokens: maybeObj.data as Token[] };
+        const obj = data as unknown;
+        // Some proxies might wrap as { tokens: Token[] } or { data: Token[] }
+        if (obj && typeof obj === 'object') {
+          const rec = obj as Record<string, unknown>;
+          const tokensField = rec['tokens'];
+          if (Array.isArray(tokensField)) return { tokens: tokensField as Token[] };
+          const dataField = rec['data'];
+          if (Array.isArray(dataField)) return { tokens: dataField as Token[] };
+          // LI.FI default shape: { "1": Token[], "137": Token[], ... }
+          const arrays = Object.values(rec).filter((v): v is Token[] => Array.isArray(v));
+          if (arrays.length) return { tokens: arrays.flat() };
+        }
       } catch {
         // treat as empty list on error to keep UI functional
       }
