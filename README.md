@@ -1,36 +1,56 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+LI.FI Bridge dApp — Next.js 14 (App Router)
+
+This dApp demonstrates cross-chain bridging and swapping using LI.FI routes and intents. It includes:
+
+- Chain and token selection populated from LI.FI APIs
+- Quote fetching with fee, time estimate, and minimum received
+- Wallet connect via RainbowKit (WalletConnect project ID)
+- Server-side API proxies to LI.FI REST endpoints
+
+Docs:
+- LI.FI API reference: https://docs.li.fi/api-reference/introduction
+- Supported chains: https://docs.li.fi/api-reference/get-information-about-all-currently-supported-chains
+- Tokens: https://docs.li.fi/api-reference/fetch-all-known-tokens
+- Bridges & exchanges: https://docs.li.fi/api-reference/get-available-bridges-and-exchanges
+- Quote: https://docs.li.fi/api-reference/get-a-quote-for-a-token-transfer
+- Advanced routes: https://docs.li.fi/api-reference/advanced/get-a-set-of-routes-for-a-request-that-describes-a-transfer-of-tokens
+- Intents overview: https://docs.li.fi/lifi-intents/for-developers/intro
 
 ## Getting Started
 
-First, run the development server:
+1) Install deps
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```zsh
+pnpm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+2) Configure env
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Copy `.env.local.example` to `.env.local` and fill values:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```
+LI_FI_API_BASE=https://li.quest/v1
+LI_FI_INTENTS_BASE=https://intents.li.fi/v1
+# Optional LI.FI API key
+# LI_FI_API_KEY=
+# Required for WalletConnect via RainbowKit
+NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=your_project_id
+```
 
-## Learn More
+3) Run dev server
 
-To learn more about Next.js, take a look at the following resources:
+```zsh
+pnpm dev
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Testing
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```zsh
+pnpm test
+```
 
-## Deploy on Vercel
+## Notes
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- The server routes under `app/api/lifi/*` forward your requests to LI.FI and inject `x-lifi-api-key` if provided.
+- The UI uses React Query for data fetching and Zustand for local state.
+- WalletConnect requires a project ID from https://cloud.walletconnect.com/.
