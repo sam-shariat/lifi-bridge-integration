@@ -32,13 +32,24 @@ function useTokens(chainId?: number, include: 'popular' | 'all' = 'popular') {
   return useQuery<{ tokens: Token[] }>({
     queryKey: ['tokens', chainId, include],
     enabled: !!chainId,
-    // Normalize to always return { tokens: Token[] }
+    // Avoid retry storms on 404/429; don't refetch on focus to reduce noise
+    retry: (failureCount, error) => {
+      const msg = String(error);
+      if (msg.includes('404') || msg.includes('429')) return false;
+      return failureCount < 2; // small retry for transient network issues
+    },
+    refetchOnWindowFocus: false,
+    // Normalize to always return { tokens: Token[] } and swallow non-OK as empty
     queryFn: async () => {
-      const data = await fetchJSON<unknown>(`/api/lifi/tokens?chains=${chainId}&include=${include}`);
-      if (Array.isArray(data)) return { tokens: data as Token[] };
-      const maybeObj = data as { tokens?: unknown; data?: unknown };
-      if (Array.isArray(maybeObj?.tokens)) return { tokens: maybeObj.tokens as Token[] };
-      if (Array.isArray(maybeObj?.data)) return { tokens: maybeObj.data as Token[] };
+      try {
+        const data = await fetchJSON<unknown>(`/api/lifi/tokens?chainId=${chainId}&include=${include}`);
+        if (Array.isArray(data)) return { tokens: data as Token[] };
+        const maybeObj = data as { tokens?: unknown; data?: unknown };
+        if (Array.isArray(maybeObj?.tokens)) return { tokens: maybeObj.tokens as Token[] };
+        if (Array.isArray(maybeObj?.data)) return { tokens: maybeObj.data as Token[] };
+      } catch {
+        // treat as empty list on error to keep UI functional
+      }
       return { tokens: [] as Token[] };
     },
     staleTime: 60_000,
@@ -100,8 +111,13 @@ export default function BridgeForm() {
   // Select defaults once chains load
   useEffect(() => {
     if (!chains || chains.length === 0) return;
-    if (!fromChainId) set('fromChainId', chains.find((c) => c.name.toLowerCase().includes('ethereum'))?.id ?? chains[0].id);
-    if (!toChainId) set('toChainId', chains.find((c) => c.name.toLowerCase().includes('polygon'))?.id ?? chains[1]?.id ?? chains[0].id);
+    // Only set defaults once when both are unset to avoid flip-flopping
+    if (!fromChainId && !toChainId) {
+      const fromDefault = chains.find((c) => c.name.toLowerCase().includes('ethereum'))?.id ?? chains[0].id;
+      const toDefault = chains.find((c) => c.name.toLowerCase().includes('polygon'))?.id ?? chains[1]?.id ?? chains[0].id;
+      set('fromChainId', fromDefault);
+      set('toChainId', toDefault);
+    }
   }, [chains, fromChainId, toChainId, set]);
 
   // Reset tokens when chains change

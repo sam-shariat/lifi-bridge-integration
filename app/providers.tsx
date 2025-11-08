@@ -13,7 +13,8 @@ const wagmiConfig = getDefaultConfig({
   appName: 'LI.FI Bridge',
   projectId,
   chains: [mainnet, polygon, arbitrum, optimism, base, bsc, avalanche],
-  ssr: true,
+  // Disable SSR for wagmi/rainbowkit to avoid server-side walletconnect usage of indexedDB
+  ssr: false,
 });
 
 export default function Providers({ children }: { children: ReactNode }) {
