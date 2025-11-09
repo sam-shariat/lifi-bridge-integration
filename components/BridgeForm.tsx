@@ -1,11 +1,26 @@
 "use client";
 
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useBridgeStore } from '@/lib/store';
 import type { Chain, Token, QuoteResponse } from '@/lib/types';
-import { calcMinReceived, formatNumber, toBaseUnits } from '@/lib/format';
+import { calcMinReceived, formatNumber, toBaseUnits, fromBaseUnits } from '@/lib/format';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
+import { useAccount, useChainId, useSwitchChain, useWalletClient, usePublicClient } from 'wagmi';
+import type { Hex } from 'viem';
+
+const ERC20_ABI = [
+  {
+    type: 'function',
+    stateMutability: 'nonpayable',
+    name: 'approve',
+    inputs: [
+      { name: 'spender', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+] as const;
 
 async function fetchJSON<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
   const res = await fetch(input, init);
@@ -28,9 +43,10 @@ function useChains() {
   });
 }
 
-function useTokens(chainId?: number, include: 'popular' | 'all' = 'popular') {
+// Fetch tokens for a single chain, flattening LI.FI response { tokens: { chainId: Token[] } }
+function useTokens(chainId?: number) {
   return useQuery<{ tokens: Token[] }>({
-    queryKey: ['tokens', chainId, include],
+    queryKey: ['tokens', chainId],
     enabled: !!chainId,
     // Avoid retry storms on 404/429; don't refetch on focus to reduce noise
     retry: (failureCount, error) => {
@@ -41,27 +57,41 @@ function useTokens(chainId?: number, include: 'popular' | 'all' = 'popular') {
     refetchOnWindowFocus: false,
     // Normalize to always return { tokens: Token[] } and swallow non-OK as empty
     queryFn: async () => {
-      try {
-        // LI.FI docs: GET /v1/tokens returns an object mapping chainId -> Token[]
-        // Optional query param `chains` restricts to specific chains. No `include` param.
-        const data = await fetchJSON<unknown>(`/api/lifi/tokens?chains=${chainId}`);
-        if (Array.isArray(data)) return { tokens: data as Token[] };
-        const obj = data as unknown;
-        // Some proxies might wrap as { tokens: Token[] } or { data: Token[] }
-        if (obj && typeof obj === 'object') {
-          const rec = obj as Record<string, unknown>;
-          const tokensField = rec['tokens'];
-          if (Array.isArray(tokensField)) return { tokens: tokensField as Token[] };
-          const dataField = rec['data'];
-          if (Array.isArray(dataField)) return { tokens: dataField as Token[] };
-          // LI.FI default shape: { "1": Token[], "137": Token[], ... }
-          const arrays = Object.values(rec).filter((v): v is Token[] => Array.isArray(v));
-          if (arrays.length) return { tokens: arrays.flat() };
+      // Helper to normalize any of the observed shapes into Token[] for a chainId
+      const normalize = (raw: unknown): Token[] => {
+        if (!raw || typeof raw !== 'object') return [];
+        const root = raw as Record<string, unknown>;
+        if (Array.isArray(root['tokens'])) return root['tokens'] as Token[]; // direct array form
+        const nested = root['tokens'];
+        if (nested && typeof nested === 'object') {
+          const rec = nested as Record<string, unknown>;
+            const direct = rec[String(chainId)];
+            if (Array.isArray(direct)) return direct as Token[];
+            const all = Object.values(rec).filter(Array.isArray) as Token[][];
+            if (all.length) return all.flat();
         }
-      } catch {
-        // treat as empty list on error to keep UI functional
-      }
-      return { tokens: [] as Token[] };
+        // Legacy flat mapping { "1": [...], "137": [...] }
+        const flatArrays = Object.values(root).filter(Array.isArray) as Token[][];
+        if (flatArrays.length) return flatArrays.flat().filter(t => t.chainId === chainId);
+        return [];
+      };
+      // First attempt: restricted fetch
+      try {
+        const withChain = await fetch(`/api/lifi/tokens?chains=${chainId}`, { headers: { accept: 'application/json' } });
+        if (withChain.ok) {
+          const data = await withChain.json();
+          return { tokens: normalize(data) };
+        }
+        // If 404/1003, fall back to full set
+      } catch { /* swallow */ }
+      try {
+        const full = await fetch(`/api/lifi/tokens`, { headers: { accept: 'application/json' } });
+        if (full.ok) {
+          const data = await full.json();
+          return { tokens: normalize(data) };
+        }
+      } catch { /* swallow */ }
+      return { tokens: [] };
     },
     staleTime: 60_000,
   });
@@ -69,18 +99,23 @@ function useTokens(chainId?: number, include: 'popular' | 'all' = 'popular') {
 
 function useQuote() {
   const { fromChainId, toChainId, fromToken, toToken, amount, slippage } = useBridgeStore();
+  const { address } = useAccount();
   return useQuery<QuoteResponse>({
     queryKey: ['quote', fromChainId, toChainId, fromToken?.address, toToken?.address, amount, slippage],
     enabled: Boolean(fromChainId && toChainId && fromToken && toToken && amount && Number(amount) > 0),
     queryFn: async () => {
       const fromAmount = toBaseUnits(amount, fromToken!.decimals);
       const params = new URLSearchParams({
-        fromChainId: String(fromChainId!),
-        toChainId: String(toChainId!),
-        fromTokenAddress: fromToken!.address,
-        toTokenAddress: toToken!.address,
+        // LI.FI v1/quote expects these names
+        fromChain: String(fromChainId!),
+        toChain: String(toChainId!),
+        fromToken: fromToken!.address,
+        toToken: toToken!.address,
         fromAmount,
-        slippage: String(slippage),
+        // API expects decimal fraction (0-1); our UI stores percent
+        slippage: String((slippage ?? 0.5) / 100),
+        // Some providers require it; zero-address fallback if disconnected
+        fromAddress: address ?? '0x0000000000000000000000000000000000000000',
       });
       return fetchJSON(`/api/lifi/quote?${params.toString()}`);
     },
@@ -118,6 +153,94 @@ export default function BridgeForm() {
   const { data: fromTokens } = useTokens(fromChainId);
   const { data: toTokens } = useTokens(toChainId);
   const quote = useQuote();
+  const currentChainId = useChainId();
+  const { switchChainAsync } = useSwitchChain();
+  const { data: walletClient } = useWalletClient();
+  const publicClient = usePublicClient();
+  const [approving, setApproving] = useState(false);
+  const [approved, setApproved] = useState(false);
+  const [bridging, setBridging] = useState(false);
+  const [txHash, setTxHash] = useState<string | undefined>();
+
+  const needsApproval = useMemo(() => {
+    const spender = quote.data?.estimate?.approvalAddress;
+    const isNative = fromToken?.address === '0x0000000000000000000000000000000000000000' || fromToken?.address?.toLowerCase() === '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+    return Boolean(spender && fromToken && !isNative);
+  }, [quote.data, fromToken]);
+
+  // Helpers
+  const parseHexOrDecToBigInt = (v?: string): bigint | undefined => {
+    if (!v) return undefined;
+    try {
+      if (v.startsWith('0x') || v.startsWith('0X')) return BigInt(v);
+      return BigInt(v);
+    } catch {
+      return undefined;
+    }
+  };
+
+  const onApprove = async () => {
+    if (!walletClient || !publicClient || !fromToken) return;
+    const spender = quote.data?.estimate?.approvalAddress as `0x${string}` | undefined;
+    const amountBase = quote.data?.estimate?.fromAmount || quote.data?.fromAmount || amount ? toBaseUnits(amount, fromToken.decimals) : undefined;
+    if (!spender || !amountBase) return;
+    try {
+      if (currentChainId !== fromChainId && switchChainAsync && fromChainId) {
+        await switchChainAsync({ chainId: fromChainId });
+      }
+      setApproving(true);
+      setTxHash(undefined);
+      const hash = await walletClient.writeContract({
+        address: fromToken.address as `0x${string}`,
+        abi: ERC20_ABI,
+        functionName: 'approve',
+        args: [spender, BigInt(amountBase)],
+        chain: undefined,
+        account: walletClient.account,
+      });
+      // Wait for confirmation
+      await publicClient.waitForTransactionReceipt({ hash });
+      setApproved(true);
+      setTxHash(hash);
+    } catch (e) {
+      console.error('Approve failed', e);
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  const onBridge = async () => {
+    if (!walletClient) return;
+    const tx = quote.data?.transactionRequest as {
+      to?: string;
+      data?: Hex;
+      value?: string;
+      gasPrice?: string;
+      gasLimit?: string;
+      chainId?: number;
+    } | undefined;
+    if (!tx || !tx.to) return;
+    try {
+      // Ensure on correct chain
+      if (currentChainId !== fromChainId && switchChainAsync && fromChainId) {
+        await switchChainAsync({ chainId: fromChainId });
+      }
+      setBridging(true);
+      setTxHash(undefined);
+      const hash = await walletClient.sendTransaction({
+        to: tx.to as `0x${string}`,
+        data: tx.data as Hex | undefined,
+        value: parseHexOrDecToBigInt(tx.value),
+        // gas & gasPrice are optional; wallet/provider will estimate if omitted
+        account: walletClient.account,
+      });
+      setTxHash(hash);
+    } catch (e) {
+      console.error('Bridge tx failed', e);
+    } finally {
+      setBridging(false);
+    }
+  };
 
   // Select defaults once chains load
   useEffect(() => {
@@ -136,11 +259,15 @@ export default function BridgeForm() {
   useEffect(() => { set('toToken', undefined); }, [toChainId, set]);
 
   const feeDisplay = useMemo(() => {
-    const fees = quote.data?.estimate?.feeCosts?.filter((f) => f.amount);
-    if (!fees || fees.length === 0) return '-';
-    // Just sum first token if same as toToken
-    const first = fees[0]!;
-    return `${first.amount} ${first.token?.symbol ?? ''}`;
+    const feeCosts = quote.data?.estimate?.feeCosts;
+    if (!feeCosts || feeCosts.length === 0) return '-';
+    // Sum USD values if present, otherwise sum raw token amounts of first token symbol
+    const usdTotal = feeCosts.reduce((acc, f) => acc + (f.amountUSD ? Number(f.amountUSD) : 0), 0);
+    if (usdTotal > 0) return `$${formatNumber(usdTotal, 4)} total fees`;
+    const token = feeCosts[0]?.token?.symbol;
+    const rawTotal = feeCosts.reduce((acc, f) => acc + (f.amount ? Number(f.amount) : 0), 0);
+    if (rawTotal > 0 && token) return `${rawTotal} ${token} fees`;
+    return feeCosts[0]?.name ?? '-';
   }, [quote.data]);
 
   const timeDisplay = useMemo(() => {
@@ -152,10 +279,24 @@ export default function BridgeForm() {
 
   const minReceived = useMemo(() => {
     if (!toToken) return '-';
-    const r = calcMinReceived(quote.data?.toAmount, quote.data?.toAmountMin, toToken.decimals, slippage);
+    // Prefer estimate.toAmountMin directly if provided (already includes slippage guarantee)
+    const toAmountMinBase = quote.data?.estimate?.toAmountMin || quote.data?.toAmountMin;
+    if (toAmountMinBase) {
+      const r = calcMinReceived(undefined, toAmountMinBase, toToken.decimals, slippage);
+      return `${formatNumber(r!.min)} ${toToken.symbol}`;
+    }
+    const r = calcMinReceived(quote.data?.estimate?.toAmount || quote.data?.toAmount, undefined, toToken.decimals, slippage);
     if (!r) return '-';
     return `${formatNumber(r.min)} ${toToken.symbol}`;
   }, [quote.data, toToken, slippage]);
+
+  const estimatedReceived = useMemo(() => {
+    if (!toToken) return '-';
+    const base = quote.data?.estimate?.toAmount || quote.data?.toAmount;
+    if (!base) return '-';
+    const num = fromBaseUnits(base, toToken.decimals);
+    return `${formatNumber(num)} ${toToken.symbol}`;
+  }, [quote.data, toToken]);
 
   return (
     <div className="w-full max-w-2xl mx-auto p-4 sm:p-6">
@@ -246,7 +387,7 @@ export default function BridgeForm() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
+        <div className="grid grid-cols-1 sm:grid-cols-5 gap-4 pt-2">
           <div>
             <div className="text-xs text-zinc-500">Estimated Fee</div>
             <div className="text-sm font-medium">{feeDisplay}</div>
@@ -256,9 +397,52 @@ export default function BridgeForm() {
             <div className="text-sm font-medium">{timeDisplay}</div>
           </div>
           <div>
+            <div className="text-xs text-zinc-500">Estimated Received</div>
+            <div className="text-sm font-medium">{estimatedReceived}</div>
+          </div>
+          <div>
             <div className="text-xs text-zinc-500">Minimum Received</div>
             <div className="text-sm font-medium">{minReceived}</div>
           </div>
+          <div>
+            <div className="text-xs text-zinc-500">Quote Details</div>
+            <div className="text-xs leading-tight max-h-12 overflow-hidden">
+              {quote.data?.toolDetails?.name && (
+                <span className="inline-block mr-1">Tool: {quote.data.toolDetails.name}</span>
+              )}
+              {quote.data?.estimate?.approvalAddress && (
+                <span className="inline-block mr-1">Approval: {quote.data.estimate.approvalAddress.slice(0,6)}…</span>
+              )}
+              {quote.data?.estimate?.fromAmountUSD && quote.data?.estimate?.toAmountUSD && (
+                <span className="inline-block">ΔUSD: {formatNumber(Number(quote.data.estimate.fromAmountUSD) - Number(quote.data.estimate.toAmountUSD), 4)}</span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div className="flex items-center gap-3">
+          {needsApproval && (
+            <button
+              className="rounded-md bg-zinc-900 text-white px-3 py-2 text-sm disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+              disabled={approving || approved || !quote.data}
+              onClick={onApprove}
+            >
+              {approving ? 'Approving…' : approved ? 'Approved' : 'Approve'}
+            </button>
+          )}
+          <button
+            className="rounded-md bg-blue-600 text-white px-3 py-2 text-sm disabled:opacity-50"
+            disabled={bridging || !quote.data}
+            onClick={onBridge}
+          >
+            {currentChainId !== fromChainId ? `Switch to ${chains?.find(c => c.id === fromChainId)?.name ?? 'source chain'}` : (bridging ? 'Bridging…' : 'Bridge')}
+          </button>
+          {txHash && (
+            <a className="text-xs text-blue-600 underline" href={`https://explorer.li.fi/tx/${txHash}`} target="_blank" rel="noreferrer">
+              View Tx
+            </a>
+          )}
         </div>
 
         {quote.isLoading && (

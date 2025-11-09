@@ -10,7 +10,12 @@ export function buildHeaders(): Record<string, string> {
 }
 
 export function forwardSearch(base: string, path: string, search: URLSearchParams) {
-  const url = new URL(path, base);
+  const baseUrl = new URL(base);
+  // Ensure base pathname ends with a trailing slash so relative resolution keeps the path (e.g. /v1)
+  if (!baseUrl.pathname.endsWith('/')) baseUrl.pathname += '/';
+  // Resolve without leading slash so we don't drop the version segment from the base
+  const relativePath = path.replace(/^\/+/, '');
+  const url = new URL(relativePath, baseUrl);
   // Append all search params as-is
   search.forEach((v, k) => url.searchParams.append(k, v));
   return url.toString();
